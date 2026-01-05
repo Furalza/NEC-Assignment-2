@@ -14,8 +14,8 @@ from .mutation import mutate_one_gene, mutate_per_gene
 @dataclass
 class GAConfig:
     # Problem setup
-    k_colors: int = 20            # upper bound on allowed colors
-    penalty: float = 1000.0       # penalty for each conflict
+    k_colors: int = 20
+    penalty: float = 1000.0
 
     # GA parameters
     pop_size: int = 100
@@ -28,11 +28,14 @@ class GAConfig:
     crossover_rate: float = 0.9
 
     mutation: str = "per_gene"        # "one_gene" or "per_gene"
-    mutation_rate: float = 0.02       # for per_gene; for one_gene = probability to apply one mutation
+    mutation_rate: float = 0.02       # per_gene: probability per gene; one_gene: prob to apply one mutation
 
-    elitism: int = 1                  # how many best individuals copied to next gen
+    elitism: int = 1
+    patience: int = 200
 
-    patience: int = 200               # stop if no improvement for this many generations
+    # --- Hybrid (repair / local search) ---
+    use_repair: bool = True
+    repair_steps: int = 300  # how many conflict-fix moves to try per child
 
 
 @dataclass
@@ -72,21 +75,67 @@ def _crossover(p1: List[int], p2: List[int], cfg: GAConfig) -> Tuple[List[int], 
 
 def _mutate(child: List[int], cfg: GAConfig) -> List[int]:
     if cfg.mutation == "one_gene":
-        # Interpret mutation_rate as probability to apply one mutation
         return mutate_one_gene(child, cfg.k_colors) if random.random() < cfg.mutation_rate else child
-
     if cfg.mutation == "per_gene":
         return mutate_per_gene(child, cfg.k_colors, p=cfg.mutation_rate)
-
     raise ValueError("cfg.mutation must be 'one_gene' or 'per_gene'")
 
 
+def _count_conflicts_for_vertex(graph: GraphData, chrom: List[int], v: int) -> int:
+    cv = chrom[v]
+    c = 0
+    for nb in graph.adjacency[v]:
+        if chrom[nb] == cv:
+            c += 1
+    return c
+
+
+def _best_color_for_vertex(graph: GraphData, chrom: List[int], v: int, k_colors: int) -> Tuple[int, int]:
+    """
+    Try all colors and pick the one with minimum local conflicts.
+    Returns (best_color, best_local_conflicts).
+    """
+    best_color = chrom[v]
+    best_conf = _count_conflicts_for_vertex(graph, chrom, v)
+
+    for color in range(k_colors):
+        if color == chrom[v]:
+            continue
+        old = chrom[v]
+        chrom[v] = color
+        conf = _count_conflicts_for_vertex(graph, chrom, v)
+        chrom[v] = old
+        if conf < best_conf:
+            best_conf = conf
+            best_color = color
+            if best_conf == 0:
+                break
+
+    return best_color, best_conf
+
+
+def repair_solution(graph: GraphData, chrom: List[int], k_colors: int, steps: int) -> List[int]:
+    """
+    Greedy repair/local search:
+    - repeatedly pick a conflicted vertex and recolor it to reduce conflicts.
+    - stop early if no conflicts.
+    """
+    c = chrom[:]
+
+    for _ in range(steps):
+        # Collect conflicted vertices
+        conflicted = [v for v in range(graph.n_vertices) if _count_conflicts_for_vertex(graph, c, v) > 0]
+        if not conflicted:
+            break
+
+        v = random.choice(conflicted)
+        best_color, _ = _best_color_for_vertex(graph, c, v, k_colors)
+        c[v] = best_color
+
+    return c
+
+
 def run_ga(graph: GraphData, cfg: GAConfig, seed: Optional[int] = None) -> GARunResult:
-    """
-    Genetic Algorithm for Graph Coloring.
-    Keeps best-so-far solution (important: best may appear mid-run).
-    Uses elitism + early stopping via patience.
-    """
     if seed is not None:
         random.seed(seed)
 
@@ -115,7 +164,6 @@ def run_ga(graph: GraphData, cfg: GAConfig, seed: Optional[int] = None) -> GARun
         evals = [evaluate(graph, ind, penalty=cfg.penalty) for ind in pop]
         fits = [e.fitness for e in evals]
 
-        # best in current population
         best_idx = max(range(len(pop)), key=lambda i: fits[i])
         cur_best_fit = fits[best_idx]
         cur_best_eval = evals[best_idx]
@@ -138,18 +186,15 @@ def run_ga(graph: GraphData, cfg: GAConfig, seed: Optional[int] = None) -> GARun
             stopped_early = True
             break
 
-        # elitism
         elite_n = max(0, min(cfg.elitism, cfg.pop_size))
         elite_idxs = sorted(range(len(pop)), key=lambda i: fits[i], reverse=True)[:elite_n]
         elites = [pop[i][:] for i in elite_idxs]
 
-        # select parents for the rest
         n_needed = cfg.pop_size - elite_n
         parents = _select_parents(pop, fits, cfg, n_parents=n_needed)
 
         next_pop: List[List[int]] = elites[:]
 
-        # generate children
         i = 0
         while len(next_pop) < cfg.pop_size:
             p1 = parents[i % len(parents)]
@@ -158,11 +203,16 @@ def run_ga(graph: GraphData, cfg: GAConfig, seed: Optional[int] = None) -> GARun
 
             c1, c2 = _crossover(p1, p2, cfg)
             c1 = _mutate(c1, cfg)
-            if len(next_pop) < cfg.pop_size:
-                next_pop.append(c1)
+            c2 = _mutate(c2, cfg)
+
+            # Repair/local search (hybrid GA)
+            if cfg.use_repair:
+                c1 = repair_solution(graph, c1, cfg.k_colors, cfg.repair_steps)
+                c2 = repair_solution(graph, c2, cfg.k_colors, cfg.repair_steps)
 
             if len(next_pop) < cfg.pop_size:
-                c2 = _mutate(c2, cfg)
+                next_pop.append(c1)
+            if len(next_pop) < cfg.pop_size:
                 next_pop.append(c2)
 
         pop = next_pop
