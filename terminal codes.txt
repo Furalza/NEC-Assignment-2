@@ -1,0 +1,11 @@
+python -m experiments.run_experiments --graph data/myciel3.col --generations 100
+
+python -m experiments.run_experiments --graph data/myciel5.col --generations 2000 --k_colors 6
+python -m experiments.run_experiments --graph data/myciel5.col --generations 2000 --k_colors 7
+
+python -m experiments.run_experiments --graph data/le450_15a.col --generations 500 --k_colors 18
+python -m experiments.run_experiments --graph data/le450_15a.col --generations 500 --k_colors 20
+python -m experiments.run_experiments --graph data/le450_15a.col --generations 200 --k_colors 25
+
+python -m experiments.run_experiments --graph data/le450_15a.col --generations 500 --k_colors 18 --method all --use_repair
+python -u -m experiments.run_experiments --graph data/le450_15a.col --generations 500 --k_colors 18 --method all --use_repair

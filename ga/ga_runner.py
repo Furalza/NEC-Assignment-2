@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 
 from .graph_io import GraphData
 from .fitness import FitnessResult, evaluate
@@ -81,7 +81,12 @@ def _mutate(child: List[int], cfg: GAConfig) -> List[int]:
     raise ValueError("cfg.mutation must be 'one_gene' or 'per_gene'")
 
 
+# ---------------------------
+# FAST REPAIR (incremental)
+# ---------------------------
+
 def _count_conflicts_for_vertex(graph: GraphData, chrom: List[int], v: int) -> int:
+    """How many neighbors of v share the same color as v."""
     cv = chrom[v]
     c = 0
     for nb in graph.adjacency[v]:
@@ -90,21 +95,29 @@ def _count_conflicts_for_vertex(graph: GraphData, chrom: List[int], v: int) -> i
     return c
 
 
+def _neighbor_color_counts(graph: GraphData, chrom: List[int], v: int, k_colors: int) -> List[int]:
+    """counts[color] = number of neighbors of v having that color."""
+    counts = [0] * k_colors
+    for nb in graph.adjacency[v]:
+        col = chrom[nb]
+        if 0 <= col < k_colors:
+            counts[col] += 1
+    return counts
+
+
 def _best_color_for_vertex(graph: GraphData, chrom: List[int], v: int, k_colors: int) -> Tuple[int, int]:
     """
-    Try all colors and pick the one with minimum local conflicts.
+    Pick the color that minimizes local conflicts at v (no temporary recolor loop).
     Returns (best_color, best_local_conflicts).
     """
-    best_color = chrom[v]
-    best_conf = _count_conflicts_for_vertex(graph, chrom, v)
+    counts = _neighbor_color_counts(graph, chrom, v, k_colors)
+
+    current = chrom[v]
+    best_color = current
+    best_conf = counts[current] if 0 <= current < k_colors else 10**9
 
     for color in range(k_colors):
-        if color == chrom[v]:
-            continue
-        old = chrom[v]
-        chrom[v] = color
-        conf = _count_conflicts_for_vertex(graph, chrom, v)
-        chrom[v] = old
+        conf = counts[color]
         if conf < best_conf:
             best_conf = conf
             best_color = color
@@ -116,21 +129,45 @@ def _best_color_for_vertex(graph: GraphData, chrom: List[int], v: int, k_colors:
 
 def repair_solution(graph: GraphData, chrom: List[int], k_colors: int, steps: int) -> List[int]:
     """
-    Greedy repair/local search:
-    - repeatedly pick a conflicted vertex and recolor it to reduce conflicts.
-    - stop early if no conflicts.
+    Fast greedy repair/local search:
+    - Maintain a set of conflicted vertices.
+    - Each step recolor one conflicted vertex to reduce conflicts.
+    - Only update conflict-status locally (vertex + neighbors).
     """
     c = chrom[:]
+    n = graph.n_vertices
+
+    # Initial conflicted set: scan edges once using adjacency
+    conflicted: Set[int] = set()
+    for v in range(n):
+        cv = c[v]
+        for nb in graph.adjacency[v]:
+            if nb > v and c[nb] == cv:
+                conflicted.add(v)
+                conflicted.add(nb)
+
+    if not conflicted:
+        return c
+
+    def refresh_vertex(vx: int) -> None:
+        if _count_conflicts_for_vertex(graph, c, vx) > 0:
+            conflicted.add(vx)
+        else:
+            conflicted.discard(vx)
 
     for _ in range(steps):
-        # Collect conflicted vertices
-        conflicted = [v for v in range(graph.n_vertices) if _count_conflicts_for_vertex(graph, c, v) > 0]
         if not conflicted:
             break
 
-        v = random.choice(conflicted)
+        v = random.choice(tuple(conflicted))
         best_color, _ = _best_color_for_vertex(graph, c, v, k_colors)
-        c[v] = best_color
+        if best_color != c[v]:
+            c[v] = best_color
+
+        # local updates only
+        refresh_vertex(v)
+        for nb in graph.adjacency[v]:
+            refresh_vertex(nb)
 
     return c
 
