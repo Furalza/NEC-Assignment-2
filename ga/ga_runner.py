@@ -35,7 +35,7 @@ class GAConfig:
 
     # --- Hybrid (repair / local search) ---
     use_repair: bool = True
-    repair_steps: int = 300  # how many conflict-fix moves to try per child
+    repair_steps: int = 80  # how many conflict-fix moves to try per child
 
 
 @dataclass

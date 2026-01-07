@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import os
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 import matplotlib.pyplot as plt
 
@@ -10,46 +11,53 @@ from ga.graph_io import read_col
 from ga.ga_runner import GAConfig, run_ga
 
 
-def ensure_dirs():
+def ensure_dirs() -> None:
     os.makedirs("results", exist_ok=True)
     os.makedirs("plots", exist_ok=True)
 
 
-def make_configs(k_colors: int) -> List[GAConfig]:
+def make_configs(k_colors: int, generations: int) -> List[GAConfig]:
     """
-    At least 6 combinations (selection/crossover/mutation/pop size/mutation rate).
-    Keep generations moderate so you can iterate fast; you can increase later.
+    Build a set of GA configurations for comparison.
+    Includes 6 standard configs + 2 stronger configs for large graphs.
     """
     base = dict(
         k_colors=k_colors,
         penalty=1000.0,
-        generations=2000,
+        generations=generations,
         elitism=1,
-        patience=250,
+        patience=max(50, generations // 4),
         crossover_rate=0.9,
         tournament_k=3,
     )
 
-    return [
+    configs = [
+        # Standard configs (6)
         GAConfig(**base, pop_size=100, selection="tournament", crossover="one_point", mutation="one_gene", mutation_rate=0.25),
         GAConfig(**base, pop_size=100, selection="tournament", crossover="uniform",  mutation="one_gene", mutation_rate=0.25),
         GAConfig(**base, pop_size=150, selection="tournament", crossover="one_point", mutation="per_gene", mutation_rate=0.02),
         GAConfig(**base, pop_size=150, selection="tournament", crossover="uniform",  mutation="per_gene", mutation_rate=0.02),
         GAConfig(**base, pop_size=120, selection="roulette",   crossover="one_point", mutation="per_gene", mutation_rate=0.03),
         GAConfig(**base, pop_size=120, selection="roulette",   crossover="uniform",  mutation="per_gene", mutation_rate=0.03),
+
+        # Stronger configs for large graphs (2)
+        GAConfig(**base, pop_size=300, selection="tournament", crossover="uniform", mutation="per_gene", mutation_rate=0.05),
+        GAConfig(**base, pop_size=400, selection="tournament", crossover="uniform", mutation="per_gene", mutation_rate=0.07),
     ]
 
+    return configs
 
-def run_dataset(dataset_path: str, tag: str, k_colors: int):
+
+def run_dataset(dataset_path: str, tag: str, k_colors: int, generations: int) -> None:
     graph = read_col(dataset_path)
-    cfgs = make_configs(k_colors)
+    cfgs = make_configs(k_colors, generations)
 
     rows: List[Dict[str, Any]] = []
-    best_by_score: Tuple[int, int] | None = None
+    best_by_score: Optional[Tuple[int, int]] = None
     best_run = None
 
     for i, cfg in enumerate(cfgs, start=1):
-        # fixed seed per config for reproducibility
+        # Fixed seed per config for reproducibility
         result = run_ga(graph, cfg, seed=i)
 
         conflicts = result.best_eval.conflicts
@@ -67,6 +75,7 @@ def run_dataset(dataset_path: str, tag: str, k_colors: int):
             "mutation_rate": cfg.mutation_rate,
             "crossover_rate": cfg.crossover_rate,
             "elitism": cfg.elitism,
+            "generations_target": cfg.generations,
             "generations_run": result.generations_run,
             "stopped_early": result.stopped_early,
             "best_conflicts": conflicts,
@@ -113,21 +122,52 @@ def run_dataset(dataset_path: str, tag: str, k_colors: int):
     print("Best result:", res_best.best_eval)
 
 
-def main():
-    ensure_dirs()
-
-    # Put your .col files in data/ and update names here
-    datasets = [
-        ("data/small.col", "small", 20),
-        ("data/medium.col", "medium", 40),
-        ("data/large.col", "large", 80),
+def default_datasets() -> List[Tuple[str, str, int]]:
+    """
+    (path, tag, k_colors upper bound)
+    """
+    return [
+        ("data/myciel3.col", "myciel3", 6),
+        ("data/myciel5.col", "myciel5", 10),
+        ("data/le450_15a.col", "le450_15a", 25),
     ]
 
-    for path, tag, k_colors in datasets:
+
+def guess_k_colors_from_name(tag: str) -> int:
+    mapping = {
+        "myciel3": 6,
+        "myciel5": 10,
+        "le450_15a": 25,
+    }
+    return mapping.get(tag, 25)
+
+
+def main() -> None:
+    ensure_dirs()
+
+    parser = argparse.ArgumentParser(description="Run GA experiments for graph coloring (.col instances).")
+    parser.add_argument("--graph", type=str, default=None, help="Run a single .col file (e.g., data/myciel3.col)")
+    parser.add_argument("--generations", type=int, default=2000, help="Number of generations (default: 2000)")
+    parser.add_argument("--k_colors", type=int, default=None, help="Override k_colors upper bound (optional)")
+    args = parser.parse_args()
+
+    if args.graph:
+        path = args.graph
+        tag = os.path.splitext(os.path.basename(path))[0]
+        k_colors = args.k_colors if args.k_colors is not None else guess_k_colors_from_name(tag)
+
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Graph file not found: {path}")
+
+        run_dataset(path, tag, k_colors, args.generations)
+        return
+
+    # Run all defaults
+    for path, tag, k_colors in default_datasets():
         if not os.path.exists(path):
             print(f"WARNING: file not found: {path} (skip)")
             continue
-        run_dataset(path, tag, k_colors)
+        run_dataset(path, tag, k_colors, args.generations)
 
 
 if __name__ == "__main__":
